@@ -14,48 +14,54 @@ Conversational AI tutoring in typical chat interfaces lacks a stable, invariant 
 
 ```
                [ Learning Context / Instruction ]
-                               │
-                               ▼
-                   Objective Ledger (in context)
-                   • Flat objectives with `enables` edges
-                   • Cumulative coverage observations
-                   • Active / Deferred disposition
-                               │
-                               ▼ (Assessment Milestone & Learner Consent)
-                     Assessment Brief
-                               │
-                               ▼
-                     `quiz-designer` Skill
-                               │
-              ┌────────────────┴────────────────┐
-              ▼                                 ▼
-    `questionnaire.json`                  `rubric.json`
-    (Public Presentation)              (Private Evaluation)
-              │                                 │
-              ▼                                 │
-    [ `live-quiz` Engine ]                      │
-    • Standalone Local Web App                  │
-    • Zero LLM at runtime                       │
-    • Ephemeral SQLite Journal                  │
-    • Authoritative Server Timer                │
-    • Active time vs Pause tracking             │
-              │                                 │
-              │ (Atomic Export attempt.json)    │
-              ▼                                 ▼
-       `attempt.json`  ──────────────►  [ `quiz-evaluator` Skill ]
-                                                │
-                                                ▼
-                                        `evaluation.json`
-                                                │
-                                                ▼
-                                          [ `tutor` Skill ]
-                                      (3-Stage Socratic Debrief)
-                                                │
-                                                ▼
-                                    [ Cognitive Consolidation ]
-                                   (Selective Project Docs Only)
+                                │
+                                ▼
+                   [ External Learning System ]
+     ┌───────────────────────────────────────────────────────┐
+     │ • Canonical Catalog (Competencies, Objectives, IDs)   │
+     │ • Learner History (Observations, Contexts, Evidence)  │◄────────────┐
+     └───────────────────────────────────────────────────────┘             │
+                                │                                          │
+                                ▼                                          │
+                  `learning-objectives` / `tutor`                          │
+               (Candidate search & contextual scoping)                     │
+                                │                                          │
+                                ▼ (Assessment Milestone & Learner Consent) │
+                        Assessment Brief                                   │
+                                │                                          │
+                                ▼                                          │
+                      `quiz-designer` Skill                                │
+                                │                                          │
+               ┌────────────────┴────────────────┐                         │
+               ▼                                 ▼                         │
+     `questionnaire.json`                  `rubric.json`                   │
+     (Public Presentation                  (Private Evaluation             │
+      + Canonical Objective Refs)           + Deterministic Obj Mappings)  │
+               │                                 │                         │
+               ▼                                 │                         │
+     [ `live-quiz` Engine ]                      │                         │
+     • Standalone Local Web App                  │                         │
+     • Zero LLM at runtime                       │                         │
+     • Ephemeral SQLite Journal                  │                         │
+     • Authoritative Server Timer                │                         │
+     • Structural Traceability of Obj Refs       │                         │
+               │                                 │                         │
+               │ (Atomic Export attempt.json)    │                         │
+               ▼                                 ▼                         │
+        `attempt.json`  ──────────────►  [ `quiz-evaluator` Skill ]        │
+     (Preserves Question-to-Objective            │ (Deterministic          │
+      Response Mappings Verbatim)                ▼  Correlation)           │
+                                         `evaluation.json`                 │
+                                                 │                         │
+                                                 ▼                         │
+                                           [ `tutor` Skill ]               │
+                                       (3-Stage Socratic Debrief)          │
+                                                 │                         │
+                                ┌────────────────┴────────────────┐        │
+                                ▼                                 ▼        │
+                    [ Cognitive Consolidation ]        (Logs Observations  │
+                   (Selective Project Docs Only)        & Evidence) ───────┘
 ```
-
 ---
 
 ## 2. System Responsibilities & Boundaries
@@ -68,11 +74,11 @@ The repository distributes two decoupled products:
 
 | Component | Responsibility | Inputs | Outputs | Core Invariants |
 | :--- | :--- | :--- | :--- | :--- |
-| **`learning-objectives`** | Formulates observable, assessable competencies from learning goals. | Topic / Goals / Context | Objectives & evidence criteria | Does not assume mastery; separates intention from demonstration. |
-| **`quiz-designer`** | Compiles an approved Assessment Brief into public and private contracts. | Assessment Brief | `questionnaire.json`, `rubric.json` | Max 3-question chains; hermetic context or independent rubrics; no answer leakage. |
-| **`live-quiz` Engine** | Ephemeral web server executing the assessment and capturing evidence. | `questionnaire.json`, CLI flags | `attempt.json`, session status | Never receives `rubric.json`; zero runtime LLM; authoritative server clock. |
-| **`quiz-evaluator`** | Context-isolated post-hoc evaluation of attempt against frozen rubric. | `rubric.json`, `attempt.json` | `evaluation.json` | Fresh context; purely evaluates $f(\text{rubric}, \text{attempt})$ without chat history. |
-| **`tutor`** | Facilitates learning, proposes assessment scope, leads debrief. | Learner dialogue, context | Learning interactions | Does not force assessments; leads Socratic debrief before solution reveal. |
+| **`learning-objectives`** | Formulates observable, assessable competencies; searches external catalog to propose new records and relationships. | Topic / Goals / Context, Registry candidates | Proposed objectives & evidence criteria | Does not assume mastery; canonical identity established by registry; separates intention from demonstration. |
+| **`quiz-designer`** | Compiles an approved Assessment Brief into public and private contracts. | Assessment Brief, Learner history | `questionnaire.json`, `rubric.json` | Max 3-question chains; hermetic context or independent rubrics; no answer leakage; history informs difficulty without equating exposure to mastery. |
+| **`live-quiz` Engine** | Ephemeral web server executing assessment, capturing evidence, and preserving objective references. | `questionnaire.json`, CLI flags | `attempt.json`, session status | Never receives `rubric.json`; zero runtime LLM; authoritative server clock; structural traceability of objective references; zero semantic registry queries. |
+| **`quiz-evaluator`** | Context-isolated post-hoc evaluation of attempt against frozen rubric. | `rubric.json`, `attempt.json` | `evaluation.json` | Fresh context; purely evaluates $f(\text{rubric}, \text{attempt})$ without chat history; associates evidence with canonical objective references. |
+| **`tutor`** | Facilitates learning, proposes assessment scope, logs contextual observations against stable objective IDs, leads debrief. | Learner dialogue, context, Registry/History | Learning interactions, Contextual observations | Does not force assessments; leads Socratic debrief before solution reveal; preserves repeated encounters; exposure is not mastery. |
 | **Project Repository** | Selective retention of project-specific technical findings or ADRs. | User / Tutor choice | Project docs / Git commits | No mandatory central vault; documentation follows project conventions. |
 
 ---
@@ -82,13 +88,13 @@ The repository distributes two decoupled products:
 The system communicates strictly across four versioned JSON contracts:
 
 1. **`questionnaire.json` (Public Presentation Contract):**  
-   Consumed by `live-quiz`. Contains question IDs, markdown prompts, Mermaid diagrams, KaTeX equations, interaction types, option labels, and initial code stubs. *Physically excludes answers, rubrics, and misconceptions.*
+   Consumed by `live-quiz`. Contains question IDs, markdown prompts, Mermaid diagrams, KaTeX equations, interaction types, option labels, initial code stubs, and associated canonical objective references. *Physically excludes answers, rubrics, and misconceptions.*
 2. **`rubric.json` (Private Evaluation Contract):**  
-   Retained by the calling agent workflow and supplied only to the evaluator. Contains learning objectives, observable criteria (Complete / Partial / Insufficient), categorical failure modes, and misconception signatures.
+   Retained by the calling agent workflow and supplied only to the evaluator. Contains learning objectives, observable criteria (Complete / Partial / Insufficient), categorical failure modes, misconception signatures, and explicit canonical objective references for each criterion (or a deterministic question-to-criterion mapping) to eliminate ambiguous natural-language inference.
 3. **`attempt.json` (Durable Execution Evidence):**  
-   Produced by `live-quiz` via atomic publication. Contains attempt identity, assessment/version hashes, workspace attribution, terminal status (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`), active and wall-clock durations, pause event logs, and submitted responses.
+   Produced by `live-quiz` via atomic publication. Must conform structurally to the versioned attempt schema contract (`attempt.schema.json`). Contains attempt identity, assessment/version hashes, workspace attribution, terminal status (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`), active and wall-clock durations, pause event logs, and submitted responses (preserving question-level canonical objective references verbatim).
 4. **`evaluation.json` (Diagnostic Assessment Report):**  
-   Produced by `quiz-evaluator`. Contains criterion-level attainment ratings, failure-mode classifications (`CONCEPTUAL`, `LOGICAL`, `SYNTACTIC`, `OMISSION`, `REGRESSION`), misconception hypotheses with confidence levels, and discussion probes for debriefing.
+   Produced by `quiz-evaluator`. Contains criterion-level attainment ratings correlated deterministically to canonical objective references, failure-mode classifications (`CONCEPTUAL`, `LOGICAL`, `SYNTACTIC`, `OMISSION`, `REGRESSION`), misconception hypotheses with confidence levels, and discussion probes for debriefing.
 
 ---
 
@@ -151,10 +157,14 @@ Recovery validates the journal, restores the authoritative clock, re-mounts draf
 
 ## 6. Pedagogical Scoping & Debrief Protocol
 
-### 6.1 Objective Ledger & Scoping
-- **Representation:** Objectives are maintained in the Tutor's active context as a flat collection with directed `enables` edges.
-- **Coverage Tracking:** Recorded as cumulative observations (`INTRODUCED`, `EXPLORED`, `PRACTICED`) alongside an active disposition (`ACTIVE` vs. `DEFERRED`).
-- **Scoping Gate:** When an assessment milestone is reached, the Tutor compiles a candidate **Assessment Brief**. The learner explicitly reviews and approves the scope before authoring begins.
+### 6.1 Canonical Objectives, Learning History & Assessment Scoping
+- **Integration Boundary:** Learning workflows resolve competencies and objectives against a persistent external catalog, while learner interactions accumulate as contextual observations in a longitudinal learning history. `live-quiz` has no semantic awareness of the registry, performs no registry queries or identity resolution, and manages no longitudinal history; it merely provides structural traceability of objective references across questionnaire execution and attempt export.
+- **Competencies vs. Contextualized Objectives:** The external catalog maintains a many-to-many relationship between broad, reusable competencies (e.g. *Reason about HTTP caching semantics*) and observable, contextualized learning objectives (e.g. *Explain how HTTP caching headers influence browser behavior*).
+- **Objective Ledger as In-Context View:** Within active sessions, the Tutor maintains an in-context ledger referencing stable objective identities. Deferral (`ACTIVE` vs. `DEFERRED`) is an independent pedagogical disposition that does not erase or overwrite previous learning observations.
+- **Exposure Informs Design, Not Mastery:** Prior observations (e.g. `INTRODUCED`, `EXPLORED`, `PRACTICED` as provisional examples) inform the Quiz Designer regarding familiarity and context novelty to avoid redundant introductory questioning. However, exposure is never equated to mastery: difficulty calibration must preserve distinctions between familiarity, task complexity, context novelty, assistance level, and demonstrated independent performance.
+- **Scoping Gate via Assessment Brief:** Assessment readiness is never an intrinsic or permanent flag on an objective. It is determined dynamically when the Tutor compiles a candidate **Assessment Brief** (identifying selected canonical objectives, performance criteria, context, and intended difficulty), which the learner explicitly reviews and approves before authoring begins.
+- **Deterministic Evaluator Mapping:** The assessment contract guarantees deterministic correlation between rubric criteria, question responses, and canonical objective identities without requiring `quiz-evaluator` to receive `questionnaire.json` or guess objective associations from similar wording.
+- **Unresolved System Questions:** The exact structural schema mapping of objective references across `questionnaire.json`, `rubric.json`, and `attempt.json` remains to be finalized. Furthermore, detailed registry architecture—including the authoritative storage location and synchronization strategy for learner observations (e.g. interim session-local logfiles vs. centralized store), relationship semantics (e.g. refining `enables` beyond a prerequisite DAG), dynamic roles of terminal vs. enabling objectives, and concrete observation schemas—belongs to the broader learning-system architecture and remains explicitly open.
 
 ### 6.2 Three-Stage Socratic Debrief
 1. **Results Overview:** High-level summary of overall attainment, demonstrated competencies, and friction points without revealing answers.

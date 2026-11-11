@@ -9,7 +9,7 @@ When `live-quiz` concludes, it must hand off the assessment evidence to caller w
 ## Decision
 Establish **`attempt.json` as a standardized, versioned JSON contract** published via an atomic file-replacement pattern:
 1. **Atomic Publication Pipeline:**
-   - The final attempt data is serialized to JSON conforming to `attempt.schema.json`.
+   - The final attempt data is serialized to JSON conforming to the versioned attempt schema contract (`attempt.schema.json`).
    - Written to a temporary file (`.attempt.json.tmp`) within the target directory.
    - Validated for structural correctness and flushed/fsynced to persistent storage.
    - Atomically renamed to the final destination path (`attempt.json`).
@@ -17,7 +17,7 @@ Establish **`attempt.json` as a standardized, versioned JSON contract** publishe
 2. **Reattempt vs. Recovery Semantics:**
    - **Recovery (`live-quiz recover`):** Resumes an interrupted attempt, preserving the existing `attempt_id` and journal state.
    - **Reattempt (`live-quiz start`):** Launches a fresh execution against the *same* immutable assessment definition, generating a distinct new `attempt_id`.
-3. **Contract Attributes:**
+3. **Contract Attributes & Canonical Objective Traceability:**
    Every exported attempt contains explicit provenance:
    - `schema_version`
    - `attempt_id`
@@ -25,7 +25,10 @@ Establish **`attempt.json` as a standardized, versioned JSON contract** publishe
    - `workspace` locator
    - `status` (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`)
    - `timing` (active duration seconds, wall-clock duration seconds, pause intervals)
-   - `responses` array
+   - `responses` array preserving mappings to associated canonical objective references carried in the questionnaire.
+
+   *Structural vs. Semantic Validation Invariant:*
+   The exported payload must conform structurally to the versioned attempt schema contract (`attempt.schema.json`). However, the engine maintains zero semantic awareness of external registries: it does not validate, resolve, or query objective identifiers against external catalogs, preserving them verbatim for downstream evaluation. The exact schema layout for preserving question-to-objective response traceability remains open until the JSON schema contracts are formally authored.
 
 ## Alternatives Considered
 - **Direct SQLite Database Querying by Evaluators / Future LMS:** Rejected. Exposing internal database tables couples external consumers to `live-quiz` schema migrations.
