@@ -4,15 +4,53 @@
 - Date: 2026-11-10
 
 ## Context
-When an AI agent or skill invokes `live-quiz`, the execution must not block agent reasoning indefinitely, yet the agent must be notified when the assessment concludes. We needed a process coordination mechanism that works cleanly without tight coupling to proprietary agent harnesses.
+When an AI agent or skill invokes `live-quiz`, the execution must not block agent reasoning indefinitely, yet the agent must be notified when the assessment concludes or suspends. We needed a process coordination mechanism that works cleanly without tight coupling to proprietary agent harnesses, while correctly distinguishing between process exit and assessment completion.
 
 ## Decision
-Design `live-quiz` as a standard foreground UNIX process whose termination signals session conclusion. In agent environments that support managed asynchronous tasks (such as Antigravity background tasks), the agent launches `live-quiz start`, yields the URL to the user, and terminates its turn. When `live-quiz` reaches a terminal state, its process exits with code 0, naturally triggering reactive wakeup of the agent harness.
+Design `live-quiz` as a standard foreground UNIX process whose termination signals that an execution cycle has ended, but **not necessarily that the assessment has concluded**:
+
+1. **Independent Lifecycles:**
+   $$\text{Process State (Running / Exited)} \neq \text{Assessment State (RUNNING / PAUSED / COMPLETED)}$$
+   A process exit indicates only that the current HTTP execution cycle has ended.
+2. **Structured Lifecycle Outcome:**
+   Upon process termination, `live-quiz` emits a machine-readable JSON outcome on stdout:
+   - **`FINALIZED`:** The assessment reached a terminal state (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`). `attempt.json` was durably exported. Caller proceeds to evaluation.
+   - **`SUSPENDED`:** The assessment was paused and the 2-hour grace period expired (or process terminated). The SQLite journal is retained. Caller does **not** invoke evaluation.
+   - **`ERROR`:** An operational error occurred. The SQLite journal is retained for recovery.
+3. **Sequence Diagram:**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Learner
+    participant Browser
+    participant Server as live-quiz Server
+    participant SQLite as SQLite Journal
+    participant Caller as Agent / Harness
+
+    Learner->>Browser: Click Pause
+    Browser->>Server: POST /api/session/pause
+    Server->>SQLite: Commit drafts & transition status to PAUSED
+    SQLite-->>Server: Transaction committed
+    Server-->>Browser: 200 OK (Suspension confirmed)
+    Browser->>Learner: Display "Assessment Paused" + Resume button
+
+    alt Resumed within 2-hour grace period
+        Learner->>Browser: Click Resume
+        Browser->>Server: POST /api/session/resume
+        Server->>SQLite: Commit status RUNNING & unfreeze clock
+        Server-->>Browser: 200 OK
+    else Grace period (2h) expires without resume
+        Server->>Caller: Process exits (stdout: outcome=SUSPENDED)
+        Caller->>Caller: Inspect outcome: SUSPENDED (Do NOT invoke Evaluator)
+    end
+```
 
 ## Alternatives Considered
-- **Antigravity Sidecars and `agentapi`:** Rejected. Testing revealed that `agentapi` relies on Antigravity internal language server environment variables (`ANTIGRAVITY_LS_ADDRESS`, `ANTIGRAVITY_CSRF_TOKEN`), breaking execution when run outside the agent environment and introducing unnecessary daemon infrastructure.
-- **Indefinite Synchronous Blocking Command:** Rejected. Fails over human time scales; if a learner pauses or steps away, long-running agent tool calls timeout or hang.
-- **Polling Loop:** Rejected. Wastes tokens and agent execution turns polling local status endpoints.
+- **Treating Every Process Exit as Assessment Completion:** Rejected. Conflating process termination with assessment finalization leads to evaluating incomplete paused attempts.
+- **Immediate Process Exit on Pause:** Rejected. Turning an ordinary short interruption (e.g. 2-minute phone call) into an unrecoverable dead browser tab destroys UX.
+- **Antigravity Sidecars and `agentapi`:** Rejected. Coupled to internal language server environment variables.
+
 
 ## Consequences
 - **Positive:** Complete decoupling from harness internals; standard OS process semantics (`exit 0`); portable across Antigravity, Claude Code, terminal shells, and CI pipelines.

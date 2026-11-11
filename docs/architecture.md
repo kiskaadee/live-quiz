@@ -124,8 +124,10 @@ The system explicitly separates:
 ### 5.2 Ephemeral SQLite Session Journal
 During active assessment, `live-quiz` maintains state in a temporary SQLite database (`~/.local/state/live-quiz/sessions/<attempt-id>.sqlite3`):
 - Server commits acknowledged draft updates, answer submissions, and timing events atomically to SQLite.
-- Pausing commits state and **allows the server process to exit cleanly**, preventing idle background processes.
-- Unexpected kills (`SIGKILL`, power failure) leave the journal intact.
+- **Durable Pause Checkpoint & In-Browser Resume:** Clicking **Pause** commits state, freezes active time, records `status = PAUSED` in SQLite, and displays an in-browser Resume control.
+- **Configurable Pause Grace Period (Default: 2 Hours):** The server remains alive and accessible in the browser during a 2-hour window (`--pause-grace-period 2h`). If resumed within this window, the assessment continues instantly in the browser.
+- **Grace-Period Expiration:** If the 2-hour grace period expires without resumption, the server process terminates cleanly to prevent zombie processes, retaining the journal with status `PAUSED` and emitting `outcome: SUSPENDED` on stdout.
+- Unexpected kills (`SIGKILL`, power failure) leave the journal intact for recovery.
 
 ### 5.3 Atomic Publication & Journal Deletion
 Upon reaching a terminal state (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`):

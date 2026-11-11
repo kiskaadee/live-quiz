@@ -9,17 +9,40 @@ During an assessment, the application must withstand interruptions (unexpected p
 ## Decision
 Use a temporary, local SQLite database (`~/.local/state/live-quiz/sessions/<attempt-id>.sqlite3`) strictly as an ACID-compliant **write-ahead session journal** during active execution:
 1. **Three Separated Lifecycles:**
-   - *Server Process:* Ephemeral (runs on demand, exits on terminal state or explicit pause).
+   - *Server Process:* Ephemeral (runs on demand, exits on finalization or pause grace-period expiration).
    - *Assessment Instance:* Persistent concept identified by stable IDs and immutable questionnaire version hashes.
    - *Assessment Attempt:* Persistent run representing a single pass against an immutable assessment version.
-2. **Transactional State Journaling:**
+2. **Transactional State Journaling & Durable Checkpoints:**
    - Every acknowledged answer submission, draft update, and timing event is committed immediately to SQLite.
-   - Pausing commits state and **terminates the server process cleanly**, eliminating zombie processes.
-3. **Journal Destruction Invariant:**
+   - Clicking **Pause** creates a durable checkpoint: pending drafts are saved, active time is frozen, and `status = PAUSED` is committed before browser acknowledgment.
+   - **Configurable Pause Grace Period (Default: 2 Hours):** The local server stays running during a 2-hour window (`--pause-grace-period 2h`). Resuming within this window is instant in the browser without CLI/agent interaction.
+   - If the 2-hour window expires without resumption, the server terminates cleanly to prevent zombie processes, retaining the journal with status `PAUSED`.
+3. **Assessment State Machine:**
+
+```mermaid
+stateDiagram-v2
+    [*] --> RUNNING: Attempt started
+
+    RUNNING --> PAUSED: Learner clicks Pause\n(Durable commit in SQLite)
+    PAUSED --> RUNNING: Learner clicks Resume\n(In-browser within 2h grace period)
+
+    RUNNING --> COMPLETED: Final question submitted
+    RUNNING --> CLOSED_EARLY: Learner explicitly closes early
+    RUNNING --> TIMED_OUT: Active duration budget exhausted
+
+    note right of PAUSED
+        Server stays alive for up to 2 hours.
+        If grace period expires, server exits cleanly,
+        retaining journal with status PAUSED.
+        Resume via: live-quiz recover --from-path <db>
+    end note
+```
+
+4. **Journal Destruction Invariant:**
    - Upon reaching a terminal state (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`), the server publishes `attempt.json`.
    - The temporary SQLite journal is deleted **only after durable export publication succeeds**.
-4. **Explicit Recovery Command:**
-   - If a process is killed unexpectedly or paused, the journal remains on disk.
+5. **Explicit Recovery Command:**
+   - If a process is killed unexpectedly (`SIGKILL`) or grace period expires while paused, the journal remains on disk.
    - Running `live-quiz recover --from-path <journal.sqlite3>` validates the journal, restores the authoritative clock, reloads drafts, and resumes the server under the exact same `attempt_id`.
    - *Recovery Idempotency:* If recovery is invoked on a journal whose `attempt.json` was already successfully published, it verifies the export, cleans up the journal, and exits cleanly.
 
