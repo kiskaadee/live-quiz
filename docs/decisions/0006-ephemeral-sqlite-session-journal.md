@@ -38,21 +38,27 @@ stateDiagram-v2
     end note
 ```
 
-4. **Journal Destruction Invariant:**
+4. **Durability Invariants & Engine Pragmas:**
+   - **Commit-Before-Ack:** The HTTP server commits transactions to SQLite *before* returning a successful `200 OK` acknowledgement to the client for any submission or autosaved draft.
+   - **Engine Configuration:** SQLite runs in Write-Ahead Logging mode (`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;`). `synchronous=FULL` ensures SQLite performs the required WAL synchronization after each transaction commit, providing durability against process and system failures under the documented filesystem and storage assumptions.
+   - **Storage Location & Journal File Set:** Journals reside on persistent local storage (`~/.local/state/live-quiz/sessions/`), never in volatile tmpfs. In WAL mode, the journal consists of the primary database (`<attempt-id>.sqlite3`) and its companion files (`<attempt-id>.sqlite3-wal`, `<attempt-id>.sqlite3-shm`). Because committed transactions may reside in the `-wal` file before checkpointing, recovery and lifecycle operations must manage and preserve the entire journal file set.
+   - **Crash Recovery Scope:** Recovery guarantees restoration of all *acknowledged* state. Unacknowledged in-flight client keystrokes that never completed an HTTP transaction are explicitly excluded.
+   - **Active-Time Recovery:** Active time is measured via a monotonic clock and checkpointed periodically (~1s interval). On recovery after an unexpected crash, the active countdown resumes from the last committed checkpoint. Process downtime while dead is excluded from the active-time budget and recorded separately as an interruption event.
+5. **Journal Destruction Invariant:**
    - Upon reaching a terminal state (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`), the server publishes `attempt.json`.
-   - The temporary SQLite journal is deleted **only after durable export publication succeeds**.
-5. **Explicit Recovery Command:**
-   - If a process is killed unexpectedly (`SIGKILL`) or grace period expires while paused, the journal remains on disk.
-   - Running `live-quiz recover --from-path <journal.sqlite3>` validates the journal, restores the authoritative clock, reloads drafts, and resumes the server under the exact same `attempt_id`.
-   - *Recovery Idempotency:* If recovery is invoked on a journal whose `attempt.json` was already successfully published, it verifies the export, cleans up the journal, and exits cleanly.
+   - The temporary SQLite journal file set (`.sqlite3`, `-wal`, `-shm`) is unlinked **only after durable export publication succeeds** and all database connections are closed.
+6. **Explicit Recovery Command:**
+   - If a process is killed unexpectedly (`SIGKILL`) or grace period expires while paused, the journal set remains on disk.
+   - Running `live-quiz recover --from-path <journal.sqlite3>` validates the journal set (leveraging companion `-wal` for recovery), restores the authoritative clock, reloads drafts, and resumes the server under the exact same `attempt_id`.
+   - *Recovery Idempotency:* If recovery is invoked on a journal whose `attempt.json` was already successfully published, it verifies the export, cleans up the journal file set, and exits cleanly.
 
 ## Alternatives Considered
 - **Permanent SQLite LMS Database:** Rejected. Burdening `live-quiz` with multi-workspace relational history, cross-project analytics, and long-term migrations creates severe scope creep. `live-quiz` is an assessment execution harness, not a full Learning Management System.
 - **Flat-File JSON Appending:** Rejected. Subject to partial-write corruption during sudden process kills (`SIGKILL`) or power failures.
 
 ## Consequences
-- **Positive:** Guarantees zero data loss for acknowledged submissions and drafts under crashes; allows pausing without running background processes; leaves zero state accumulation upon clean completion.
-- **Negative / Trade-offs:** Requires an explicit recovery command (`live-quiz recover`) and managing temporary journal files in the XDG state directory.
+- **Positive:** Guarantees reliable recovery of all acknowledged submissions and drafts across process termination (`SIGKILL`, application crash) under documented WAL mode assumptions; prevents active-time budget leakage during crash downtime; allows in-browser pause without indefinite background processes; leaves zero state accumulation upon clean completion.
+- **Negative / Trade-offs:** Requires an explicit recovery command (`live-quiz recover`) and managing temporary journal files (`.sqlite3`, `-wal`, `-shm`) in the XDG state directory; does not protect against unacknowledged client-side keystrokes that never completed an HTTP transaction.
 
 ## Related Decisions
 - [ADR-0002: Harness-Agnostic Process Lifecycle](./0002-harness-agnostic-process-lifecycle.md)
