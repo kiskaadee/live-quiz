@@ -92,9 +92,22 @@ The system communicates strictly across four versioned JSON contracts:
 2. **`rubric.json` (Private Evaluation Contract):**  
    Retained by the calling agent workflow and supplied only to the evaluator. Contains learning objectives, observable criteria (Complete / Partial / Insufficient), categorical failure modes, misconception signatures, and explicit canonical objective references for each criterion (or a deterministic question-to-criterion mapping) to eliminate ambiguous natural-language inference.
 3. **`attempt.json` (Durable Execution Evidence):**  
-   Produced by `live-quiz` via atomic publication. Must conform structurally to the versioned attempt schema contract (`attempt.schema.json`). Contains attempt identity, assessment/version hashes, workspace attribution, terminal status (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`), active and wall-clock durations, pause event logs, and submitted responses (preserving question-level canonical objective references verbatim).
+   Produced by `live-quiz` via atomic publication. Must conform structurally to the versioned attempt schema contract (`attempt.schema.json`). Contains attempt identity, assessment/version hashes, workspace attribution, terminal lifecycle status (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`), active and wall-clock durations, pause event logs, and an array of responses preserving question-level canonical objective references verbatim. Every item in the responses array explicitly records its interaction state via the **Response State Triad**:
+   - `SUBMITTED`: Explicitly confirmed by the learner (including explicit blank submissions).
+   - `DRAFT`: Latest acknowledged autosave payload and receipt timestamp preserved at session termination, even if unsubmitted. A draft represents an acknowledged learner-generated modification (initial empty fields remain `UNANSWERED`). (Per-question active duration is provisional pending measurement definitions).
+   - `UNANSWERED`: Zero acknowledged learner input recorded (payload is null).
+   *Valid Lifecycle & Response Combinations:*
+   While interaction status and demonstrated criterion attainment remain independent dimensions, lifecycle outcomes constrain valid response combinations:
+   - `COMPLETED`: Strictly requires every questionnaire item to have `response_status: SUBMITTED` (explicit blank submissions qualify).
+   - `CLOSED_EARLY`: At least one response must be `DRAFT` or `UNANSWERED`, following an explicit learner termination action.
+   - `TIMED_OUT`: At least one response must be `DRAFT` or `UNANSWERED`, following authoritative timer expiration.
+   *Generalized Server-Side Serialization & Absorbing Terminal States:* All response mutations (autosaves and submissions) and terminal transitions (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`) are serialized server-side within SQLite transactions. The final required response submission and transition to `COMPLETED` must be committed atomically. Once any terminal lifecycle transition commits, its status is strictly immutable and absorbing: all subsequent response mutations and competing terminal transition attempts are rejected.
 4. **`evaluation.json` (Diagnostic Assessment Report):**  
    Produced by `quiz-evaluator`. Contains criterion-level attainment ratings correlated deterministically to canonical objective references, failure-mode classifications (`CONCEPTUAL`, `LOGICAL`, `SYNTACTIC`, `OMISSION`, `REGRESSION`), misconception hypotheses with confidence levels, and discussion probes for debriefing.
+   *Evaluator Contract Across the Response State Triad:*
+   - Explicit Blank `SUBMITTED`: Evaluated as an intentional empty response against rubric criteria.
+   - `DRAFT`: Evaluated as available evidence of learning (identifying valid intermediate reasoning and progress) without automatic penalty for draft status. Discloses draft provenance, avoids hallucinating what the learner would have written with more time, and distinguishes demonstrated criteria from unestablished criteria.
+   - `UNANSWERED`: Reports that no response evidence exists. Must not infer a misconception or conclude that the learner lacks underlying competency solely because no response was recorded.
 
 ---
 
@@ -137,21 +150,20 @@ During active assessment, `live-quiz` maintains state in a temporary SQLite data
 
 ### 5.3 Atomic Publication & Journal Deletion
 Upon reaching a terminal state (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`):
-1. The server serializes the final attempt payload.
-2. Writes to a temporary file in the destination directory.
+1. The server serializes the final attempt payload, preserving all submitted responses, acknowledged unsubmitted drafts (as `DRAFT`), and unattempted questions (as `UNANSWERED`).
+2. Writes to a temporary file (`.attempt.json.tmp`) in the destination directory.
 3. Validates the JSON structure and flushes/syncs to disk.
 4. Atomically renames the file to the final destination (`attempt.json`).
-5. Closes database handles and unlinks the temporary SQLite journal.
+5. Closes database handles and unlinks the temporary SQLite journal file set (`.sqlite3`, `-wal`, `-shm`).
 6. Exits with code 0.
 
-*Invariant:* The temporary journal is never deleted if export publication fails.
+*Invariant:* The temporary journal file set is never deleted if export publication fails. Recovery (`live-quiz recover`) retries publication under the exact same `attempt_id`.
 
-### 5.4 Explicit Recovery Command
-To resume an interrupted or paused attempt:
-```bash
-live-quiz recover --from-path ~/.local/state/live-quiz/sessions/<attempt-id>.sqlite3
-```
-Recovery validates the journal, restores the authoritative clock, re-mounts drafts, and starts the server without altering the attempt identity.
+### 5.4 Two Distinct Recovery Paths
+Invoking `live-quiz recover --from-path ~/.local/state/live-quiz/sessions/<attempt-id>.sqlite3` routes deterministically based on journal state:
+1. **Nonterminal Recovery:** If the journal records an active or paused attempt (`RUNNING` or `PAUSED`), recovery restores the authoritative countdown clock, re-mounts acknowledged drafts, resumes the local HTTP server, and displays an in-browser resume control under the exact same `attempt_id`.
+2. **Terminal Export Recovery:** If the journal already records a terminal state (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`) but atomic export failed, recovery reconstructs and retries `attempt.json` publication *without reopening the assessment, restarting the timer, or permitting further modifications*.
+In both paths, the temporary SQLite journal file set (`.sqlite3`, `-wal`, `-shm`) is unlinked only after durable export publication succeeds.
 
 ---
 

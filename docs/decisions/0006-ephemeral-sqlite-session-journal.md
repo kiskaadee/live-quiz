@@ -44,12 +44,14 @@ stateDiagram-v2
    - **Storage Location & Journal File Set:** Journals reside on persistent local storage (`~/.local/state/live-quiz/sessions/`), never in volatile tmpfs. In WAL mode, the journal consists of the primary database (`<attempt-id>.sqlite3`) and its companion files (`<attempt-id>.sqlite3-wal`, `<attempt-id>.sqlite3-shm`). Because committed transactions may reside in the `-wal` file before checkpointing, recovery and lifecycle operations must manage and preserve the entire journal file set.
    - **Crash Recovery Scope:** Recovery guarantees restoration of all *acknowledged* state. Unacknowledged in-flight client keystrokes that never completed an HTTP transaction are explicitly excluded.
    - **Active-Time Recovery:** Active time is measured via a monotonic clock and checkpointed periodically (~1s interval). On recovery after an unexpected crash, the active countdown resumes from the last committed checkpoint. Process downtime while dead is excluded from the active-time budget and recorded separately as an interruption event.
-5. **Journal Destruction Invariant:**
-   - Upon reaching a terminal state (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`), the server publishes `attempt.json`.
-   - The temporary SQLite journal file set (`.sqlite3`, `-wal`, `-shm`) is unlinked **only after durable export publication succeeds** and all database connections are closed.
-6. **Explicit Recovery Command:**
+5. **Journal Destruction Invariant & Draft Preservation:**
+   - Upon reaching a terminal state (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`), the server serializes `attempt.json`, preserving all submitted responses, acknowledged unsubmitted drafts (as `DRAFT`), and unattempted questions (as `UNANSWERED`).
+   - The temporary SQLite journal file set (`.sqlite3`, `-wal`, `-shm`) is unlinked **only after durable export publication succeeds** and all database connections are closed. If publication fails, the journal remains intact for retry via recovery.
+6. **Explicit Recovery Command & Two Recovery Paths:**
    - If a process is killed unexpectedly (`SIGKILL`) or grace period expires while paused, the journal set remains on disk.
-   - Running `live-quiz recover --from-path <journal.sqlite3>` validates the journal set (leveraging companion `-wal` for recovery), restores the authoritative clock, reloads drafts, and resumes the server under the exact same `attempt_id`.
+   - Running `live-quiz recover --from-path <journal.sqlite3>` inspects journal state and executes one of two deterministic paths:
+     1. **Nonterminal Recovery:** For `RUNNING` or `PAUSED` attempts, validates the journal set (leveraging companion `-wal`), restores the authoritative clock, reloads drafts, and resumes the server under the exact same `attempt_id`.
+     2. **Terminal Export Recovery:** If the journal already records a terminal state (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`) but publication failed, recovery retries `attempt.json` publication directly from the journal without reopening the assessment session, restarting the timer, or permitting further modifications.
    - *Recovery Idempotency:* If recovery is invoked on a journal whose `attempt.json` was already successfully published, it verifies the export, cleans up the journal file set, and exits cleanly.
 
 ## Alternatives Considered

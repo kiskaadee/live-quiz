@@ -13,10 +13,11 @@ Establish **`attempt.json` as a standardized, versioned JSON contract** publishe
    - Written to a temporary file (`.attempt.json.tmp`) within the target directory.
    - Validated for structural correctness and flushed/fsynced to persistent storage.
    - Atomically renamed to the final destination path (`attempt.json`).
-   - *Failure Guarantee:* If publication fails at any stage (e.g. disk full, permissions error), the temporary SQLite journal is retained, and the process exits with an error status.
+   - *Failure Guarantee:* If publication fails at any stage (e.g. disk full, permissions error), the temporary SQLite journal file set is retained intact, and the process exits with an error status. Recovery (`live-quiz recover`) retries publication under the exact same `attempt_id`.
 2. **Reattempt vs. Recovery Semantics:**
-   - **Recovery (`live-quiz recover`):** Resumes an interrupted attempt, preserving the existing `attempt_id` and journal state.
    - **Reattempt (`live-quiz start`):** Launches a fresh execution against the *same* immutable assessment definition, generating a distinct new `attempt_id`.
+   - **Nonterminal Recovery (`live-quiz recover`):** Resumes an interrupted or paused attempt, restoring clock and drafts under the existing `attempt_id`.
+   - **Terminal Export Recovery (`live-quiz recover`):** Retries failed atomic publication directly from the terminal journal without reopening the assessment, restarting the timer, or permitting answer modifications.
 3. **Contract Attributes & Canonical Objective Traceability:**
    Every exported attempt contains explicit provenance:
    - `schema_version`
@@ -29,6 +30,25 @@ Establish **`attempt.json` as a standardized, versioned JSON contract** publishe
 
    *Structural vs. Semantic Validation Invariant:*
    The exported payload must conform structurally to the versioned attempt schema contract (`attempt.schema.json`). However, the engine maintains zero semantic awareness of external registries: it does not validate, resolve, or query objective identifiers against external catalogs, preserving them verbatim for downstream evaluation. The exact schema layout for preserving question-to-objective response traceability remains open until the JSON schema contracts are formally authored.
+4. **Response State Triad & Attainment Decoupling:**
+   Each item in `responses[]` represents its interaction state independently of the assessment lifecycle status (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`):
+   - `SUBMITTED`: Explicitly confirmed by the learner. Includes explicit blank submissions where the learner intentionally submitted an empty response.
+   - `DRAFT`: Autosaved input acknowledged by SQLite commit-before-ack but unsubmitted when session terminated. Represents an acknowledged learner-generated modification (initial empty fields remain `UNANSWERED`). The latest acknowledged draft payload and server-side receipt timestamp are preserved verbatim. (Per-question active duration is designated provisional pending formal measurement definitions).
+   - `UNANSWERED`: Zero acknowledged learner input recorded (payload is `null`).
+   
+   *Valid Terminal/Response State Constraints:*
+   - `COMPLETED`: Strictly requires every questionnaire item to have `response_status: SUBMITTED` (explicit blank submissions qualify).
+   - `CLOSED_EARLY`: At least one response must be `DRAFT` or `UNANSWERED`, following an explicit learner termination action.
+   - `TIMED_OUT`: At least one response must be `DRAFT` or `UNANSWERED`, following authoritative timer expiration.
+
+   *Generalized Server-Side Serialization & Absorbing Terminal States:*
+   All response mutations (draft autosaves, explicit submissions) and terminal lifecycle transitions (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`) are serialized server-side within SQLite transactions. The final required response submission and transition to `COMPLETED` must be committed atomically. Once any terminal lifecycle transition commits, its status is strictly immutable and absorbing: all subsequent response mutations and competing terminal transition attempts are rejected.
+   
+   *Attainment vs. Submission Independence:*
+   Submission status describes the user interaction, not the correctness or cognitive quality of the content. `quiz-evaluator` enforces evidence-first principles across the response triad:
+   - Explicit Blank `SUBMITTED`: Evaluated as an intentional empty response against rubric criteria.
+   - `DRAFT`: Evaluated as available evidence of learning without automatic penalty for draft status, disclosing draft provenance and reporting demonstrated vs. unestablished criteria.
+   - `UNANSWERED`: Reports that no response evidence exists; must not infer misconceptions or conclude that the learner lacks underlying knowledge solely due to absence of recorded input.
 
 ## Alternatives Considered
 - **Direct SQLite Database Querying by Evaluators / Future LMS:** Rejected. Exposing internal database tables couples external consumers to `live-quiz` schema migrations.

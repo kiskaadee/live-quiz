@@ -14,7 +14,7 @@ Provide an MVP collection of five modular, portable reference skills in the repo
 | **`learning-objectives`** | Formulates observable, assessable competencies; searches external catalog to propose new records and relationships. | Topic / Goals / Context, Registry candidates | Proposed objectives & evidence criteria |
 | **`quiz-designer`** | Compiles an approved Assessment Brief into public and private contracts; uses learning history to inform context and difficulty. | Assessment Brief, Learner history | `questionnaire.json`, `rubric.json` |
 | **`live-quiz`** | Operational CLI wrapper executing and recovering assessments; structurally preserves canonical objective references. | Questionnaire path, CLI flags | Browser session URL, `attempt.json` |
-| **`quiz-evaluator`** | Context-isolated post-hoc evaluation of attempt against rubric; deterministically correlates evidence with canonical objective references. | `rubric.json`, `attempt.json` | `evaluation.json` |
+| **`quiz-evaluator`** | Context-isolated post-hoc evaluation of attempt against rubric; evaluates submitted answers and drafts as learning evidence without automatic penalty; deterministically correlates evidence. | `rubric.json`, `attempt.json` | `evaluation.json` |
 | **`tutor`** | Orchestrates learning dialogue, proposes scope, logs contextual observations against stable objective IDs, and leads debrief. | Learner interaction, Registry/History | Consolidated learning experience, Contextual observations |
 
 ### Architectural Invariants:
@@ -34,6 +34,7 @@ Provide an MVP collection of five modular, portable reference skills in the repo
    - **Exposure vs. Mastery:** Prior exposure informs assessment design to avoid redundant introductory testing, but exposure is never equated to mastery. Difficulty calibration accounts for familiarity, task complexity, context novelty, assistance level, and demonstrated independent performance.
    - **Scoping Gate:** Assessment readiness is evaluated contextually when the Tutor compiles the **Assessment Brief**, rather than as an intrinsic boolean flag in the catalog.
    - **Deterministic Evaluation Correlation:** Evaluation evidence is correlated deterministically to canonical objective references using explicit mappings across rubric criteria and attempt responses, eliminating ambiguous natural-language guessing.
+   - **Evidence-First Evaluation Across Response States:** The evaluator evaluates available work in `DRAFT` responses (e.g. partial derivations, code approaches) against the rubric without penalizing draft status. It discloses draft provenance, distinguishes demonstrated criteria from unestablished criteria, and does not speculate on unwritten thoughts. For `UNANSWERED` questions, it reports that no response evidence exists without inferring misconceptions or concluding that the learner lacks underlying knowledge solely from missing input.
    - **Abstract Capability Dependency:** Reference skills depend on an abstract registry and history capability (e.g. via CLI, local HTTP, or file protocols) rather than hardcoding specific storage implementations or database technologies. Detailed registry architecture, sync strategies, and exact schema mappings remain open design questions.
 
 ## Alternatives Considered
