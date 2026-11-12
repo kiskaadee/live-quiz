@@ -75,7 +75,7 @@ The repository distributes two decoupled products:
 | Component | Responsibility | Inputs | Outputs | Core Invariants |
 | :--- | :--- | :--- | :--- | :--- |
 | **`learning-objectives`** | Formulates observable, assessable competencies; searches external catalog to propose new records and relationships. | Topic / Goals / Context, Registry candidates | Proposed objectives & evidence criteria | Does not assume mastery; canonical identity established by registry; separates intention from demonstration. |
-| **`quiz-designer`** | Compiles an approved Assessment Brief into public and private contracts. | Assessment Brief, Learner history | `questionnaire.json`, `rubric.json` | Max 3-question chains; hermetic context or independent rubrics; no answer leakage; history informs difficulty without equating exposure to mastery. |
+| **`quiz-designer`** | Compiles an approved Assessment Brief into public and private contracts. | Assessment Brief, Learner history | `questionnaire.json`, `rubric.json` | Max 3-question chains; hermetic context or independent rubrics; keeps the private rubric outside the public questionnaire and runtime contracts; rejects undeclared evaluation properties; prompt semantic quality is an authoring responsibility; history informs difficulty without equating exposure to mastery. |
 | **`live-quiz` Engine** | Ephemeral web server executing assessment, capturing evidence, and preserving objective references. | `questionnaire.json`, CLI flags | `attempt.json`, session status | Never receives `rubric.json`; zero runtime LLM; authoritative server clock; structural traceability of objective references; zero semantic registry queries. |
 | **`quiz-evaluator`** | Context-isolated post-hoc evaluation of attempt against frozen rubric. | `rubric.json`, `attempt.json` | `evaluation.json` | Fresh context; purely evaluates $f(\text{rubric}, \text{attempt})$ without chat history; associates evidence with canonical objective references. |
 | **`tutor`** | Facilitates learning, proposes assessment scope, logs contextual observations against stable objective IDs, leads debrief. | Learner dialogue, context, Registry/History | Learning interactions, Contextual observations | Does not force assessments; leads Socratic debrief before solution reveal; preserves repeated encounters; exposure is not mastery. |
@@ -88,7 +88,7 @@ The repository distributes two decoupled products:
 The system communicates strictly across four versioned JSON contracts:
 
 1. **`questionnaire.json` (Public Presentation Contract):**  
-   Consumed by `live-quiz`. Contains question IDs, markdown prompts, Mermaid diagrams, KaTeX equations, interaction types, option labels, initial code stubs, and associated canonical objective references. *Physically excludes answers, rubrics, and misconceptions.*
+   Consumed by `live-quiz`. Contains question IDs, markdown prompts, Mermaid diagrams, KaTeX equations, interaction types, option labels, initial code stubs, and associated canonical objective references. The public contract is positively defined and enforces `extra="forbid"` recursively across root and all nested models (via shared strict base inheritance), rejecting undeclared evaluation properties such as answer-key fields, rubric criteria, and misconception signatures. This is structural validation and does not inspect prompt content for semantic answer leakage.
 2. **`rubric.json` (Private Evaluation Contract):**  
    Retained by the calling agent workflow and supplied only to the evaluator. Contains learning objectives, observable criteria (Complete / Partial / Insufficient), categorical failure modes, misconception signatures, and explicit canonical objective references for each criterion (or a deterministic question-to-criterion mapping) to eliminate ambiguous natural-language inference.
 3. **`attempt.json` (Durable Execution Evidence):**  
@@ -127,8 +127,19 @@ The frontend is packaged as a static single-page application built via Vite Plus
 - **Context Sharing:** Questions may share an overarching technical scenario or stimulus.
 - **Independent Rubrics:** Each question evaluates its own distinct learning objective. Later questions provide sufficient canonical context to remain answerable even if earlier questions were missed, strictly preventing compound penalization (double jeopardy).
 
-### 4.3 Blind Pass Invariant
-The runtime provides **zero immediate correctness feedback, validation cues, or hints** during administration. The learner demonstrates unassisted performance against the frozen standard.
+### 4.3 Blind Pass Invariant & Answer-Leakage Boundary
+1. **Blind Pass Administration:**
+   The runtime provides **zero immediate correctness feedback, validation cues, or hints** during administration. The learner demonstrates unassisted performance against the frozen standard.
+2. **Physical Runtime Separation:**
+   `questionnaire.json` is the only assessment-definition artifact accepted by `live-quiz`. No supported CLI option, configuration parameter, API endpoint, or runtime code path allows `rubric.json` or its contents to enter the engine.
+3. **Recursive Structural Contract Separation & Pydantic Inheritance:**
+   Public and private contracts are maintained as disjoint Pydantic schemas. Because Pydantic v2 does not automatically propagate model configuration across nested model boundaries, every model at every nesting depth (root questionnaire, question objects, option structures, and input configurations) must inherit from a shared strict base model configured with `extra="forbid"` or declare it explicitly. Contract test suites must include negative validation tests asserting that unexpected evaluation properties are rejected at multiple nesting depths.
+4. **Context-Isolated Post-Hoc Evaluation:**
+   `quiz-evaluator` receives `rubric.json` and `attempt.json` only after successful terminal publication. The evaluator operates in a fresh context, receiving zero conversational history, tutor notes, or learner-profile context. The Tutor uses `evaluation.json` during the subsequent debrief.
+5. **Ergonomic Presentation & Explicit Non-Goals:**
+   `live-quiz` retains its standard one-question-at-a-time presentation for cognitive ergonomics, but does not impose navigation locking or anti-backtracking restrictions solely for security. The architecture explicitly rejects automated LLM semantic leakage detection and cross-question graph analysis; prompt semantic quality remains an authoring responsibility.
+6. **Engineering Guarantee & Formative Threat Model:**
+   `live-quiz` guarantees physical exclusion of the private rubric artifact from the engine and structural rejection of undeclared evaluation properties in the public questionnaire. It does not guarantee that questionnaire content authored by an LLM or human is semantically free of answers, clues, or cross-question leakage. Host-level inspection of local files or process memory remains outside the formative assessment threat model.
 
 ---
 
