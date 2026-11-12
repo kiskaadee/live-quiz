@@ -8,16 +8,27 @@ When `live-quiz` concludes, it must hand off the assessment evidence to caller w
 
 ## Decision
 Establish **`attempt.json` as a standardized, versioned JSON contract** published via an atomic file-replacement pattern:
-1. **Atomic Publication Pipeline:**
-   - The final attempt data is serialized to JSON conforming to the versioned attempt schema contract (`attempt.schema.json`).
-   - Written to a temporary file (`.attempt.json.tmp`) within the target directory.
-   - Validated for structural correctness and flushed/fsynced to persistent storage.
-   - Atomically renamed to the final destination path (`attempt.json`).
-   - *Failure Guarantee:* If publication fails at any stage (e.g. disk full, permissions error), the temporary SQLite journal file set is retained intact, and the process exits with an error status. Recovery (`live-quiz recover`) retries publication under the exact same `attempt_id`.
-2. **Reattempt vs. Recovery Semantics:**
+1. **Ten-Step Atomic Publication Pipeline & Directory Durability:**
+   Publication follows a strict 10-step sequence protected by dual advisory locks (per-attempt lock `attempt-<attempt-id>.lock` and destination lock `dest-<sha256_dest>.lock`):
+   - Acquire exclusive advisory locks (never unlinked while held).
+   - Establish write-serialization boundary via `BEGIN IMMEDIATE`:
+     - *Path A (Final Submission → `COMPLETED`):* The response mutation to `SUBMITTED`, transition to `COMPLETED`, complete response snapshot, and `publication_intent` (`target_schema_version`, `export_projection_version: "1"`, `canonicalization_version: "1"`, `destination_path`, `expected_sha256`) are committed together in one atomic transaction.
+     - *Path B (Timeout / Early Close):* The transaction is established before reading the final response snapshot and committing terminal status (`TIMED_OUT`/`CLOSED_EARLY`) and `publication_intent`.
+   - Validate structurally and serialize canonical payload conforming to RFC 8785 Canonical JSON, computing `expected_sha256` prior to `COMMIT;`.
+   - Destination conflict check: under destination lock, verify destination does not hold a different `attempt_id` (prohibiting overwriting another attempt's artifact).
+   - Write canonical bytes to attempt-specific temporary file `.attempt.<attempt-id>.tmp` in destination directory, flush, and `fsync` file descriptor.
+   - Atomically link/rename `.attempt.<attempt-id>.tmp` to `attempt.json` (using atomic no-replace semantics e.g. `renameat2(..., RENAME_NOREPLACE)`).
+   - `fsync` the parent directory descriptor to guarantee rename durability across power failure.
+   - Verified WAL checkpoint through open writable connection (`PRAGMA wal_checkpoint(TRUNCATE);`).
+   - Clean close & ordered journal cleanup: close handles cleanly → unlink `-wal` → unlink `-shm` → unlink primary `.sqlite3` **last**.
+   - Emit machine-readable outcome on stdout and exit 0 (`SUCCESS_FINALIZED`).
+2. **Reattempt vs. Recovery Semantics & Idempotency Verification:**
    - **Reattempt (`live-quiz start`):** Launches a fresh execution against the *same* immutable assessment definition, generating a distinct new `attempt_id`.
-   - **Nonterminal Recovery (`live-quiz recover`):** Resumes an interrupted or paused attempt, restoring clock and drafts under the existing `attempt_id`.
-   - **Terminal Export Recovery (`live-quiz recover`):** Retries failed atomic publication directly from the terminal journal without reopening the assessment, restarting the timer, or permitting answer modifications.
+   - **Nonterminal Recovery (`live-quiz recover`):** In-place transactional migration; resumes interrupted or paused live assessment under the existing `attempt_id`.
+   - **Terminal Export Recovery (`live-quiz recover`):**
+     - *Phase 1 (Read-Only):* Opens SQLite with read-only connection (`mode=ro`), reading existing WAL frames without mutating tables or schema; reconstructs export using `export_projection_version` and validates reconstructed hash against persisted `expected_sha256` (failing closed with exit 3 on mismatch). Legacy journals lacking `publication_intent` are explicitly rejected as unsupported (`UNSUPPORTED_SCHEMA_VERSION`, exit 5). Phase 1 read-only connection is closed cleanly before Phase 2.
+     - *Idempotency Verification:* If target exists and matches `attempt_id` and `expected_sha256`, advances directly to Phase 2 cleanup. If different `attempt_id`, exits code 2; if hash mismatch, exits code 3.
+     - *Phase 2 (Writable Cleanup):* Opened only after Phase 1 connection is closed and publication durability is established; executes verified WAL checkpoint without schema modifications, closes handles, and unlinks companions then `.sqlite3` last.
 3. **Contract Attributes & Canonical Objective Traceability:**
    Every exported attempt contains explicit provenance:
    - `schema_version`
@@ -49,6 +60,20 @@ Establish **`attempt.json` as a standardized, versioned JSON contract** publishe
    - Explicit Blank `SUBMITTED`: Evaluated as an intentional empty response against rubric criteria.
    - `DRAFT`: Evaluated as available evidence of learning without automatic penalty for draft status, disclosing draft provenance and reporting demonstrated vs. unestablished criteria.
    - `UNANSWERED`: Reports that no response evidence exists; must not infer misconceptions or conclude that the learner lacks underlying knowledge solely due to absence of recorded input.
+
+5. **Structured Process Outcomes & Exit Codes:**
+   Operational failures are strictly decoupled from assessment lifecycle outcomes. Standard output emits a single-line JSON result packet (`{"outcome": "...", "attempt_id": "...", ...}`), while standard error carries human-readable logs:
+
+   | Exit Code | Symbolic Name | Meaning | Journal Action |
+   | :---: | :--- | :--- | :--- |
+   | **`0`** | `SUCCESS_FINALIZED` | Export verified, directory synced, journal unlinked. | Deleted |
+   | **`0`** | `SUCCESS_SUSPENDED` | Pause grace period expired cleanly; resume available. | Preserved |
+   | **`1`** | `EXPORT_IO_ERROR` | Transient disk/write/sync failure during publication. | Preserved |
+   | **`2`** | `CONFLICT_DIFFERENT_ATTEMPT` | Destination occupied by a different `attempt_id`. | Preserved |
+   | **`3`** | `CONFLICT_INTEGRITY_MISMATCH` | Destination has matching ID but differing SHA-256 hash. | Preserved |
+   | **`4`** | `RECOVERY_CONCURRENCY_LOCKED` | Another process holds the advisory recovery lock. | Preserved |
+   | **`5`** | `UNSUPPORTED_SCHEMA_VERSION` | Journal or export schema version unsupported. | Preserved |
+   | **`6`** | `CLEANUP_PENDING` | Export durable and verified, but journal removal failed. | Preserved for retry |
 
 ## Alternatives Considered
 - **Direct SQLite Database Querying by Evaluators / Future LMS:** Rejected. Exposing internal database tables couples external consumers to `live-quiz` schema migrations.

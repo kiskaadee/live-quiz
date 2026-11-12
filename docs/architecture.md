@@ -148,22 +148,55 @@ During active assessment, `live-quiz` maintains state in a temporary SQLite data
 - **Grace-Period Expiration:** If the 2-hour grace period expires without resumption, the server process terminates cleanly to prevent zombie processes, retaining the journal with status `PAUSED` and emitting `outcome: SUSPENDED` on stdout.
 - Unexpected kills (`SIGKILL`, power failure) leave the journal intact for recovery.
 
-### 5.3 Atomic Publication & Journal Deletion
-Upon reaching a terminal state (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`):
-1. The server serializes the final attempt payload, preserving all submitted responses, acknowledged unsubmitted drafts (as `DRAFT`), and unattempted questions (as `UNANSWERED`).
-2. Writes to a temporary file (`.attempt.json.tmp`) in the destination directory.
-3. Validates the JSON structure and flushes/syncs to disk.
-4. Atomically renames the file to the final destination (`attempt.json`).
-5. Closes database handles and unlinks the temporary SQLite journal file set (`.sqlite3`, `-wal`, `-shm`).
-6. Exits with code 0.
+### 5.3 Ten-Step Atomic Publication Pipeline & Durability Contract
+Upon reaching a terminal state (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`), publication executes through a strict 10-step durability pipeline protected by dual advisory locks (per-attempt and destination-level):
+1. **Dual Advisory Concurrency Locks:** Acquire exclusive locks via `fcntl`/`flock` on:
+   - Per-attempt lock file (`~/.local/state/live-quiz/locks/attempt-<attempt-id>.lock`), coordinating publication and recovery.
+   - Destination-level lock file (`~/.local/state/live-quiz/locks/dest-<sha256_of_destination_path>.lock`), coordinating publications across different attempts targeting the same path.
+   Locks are retained throughout publication and cleanup, and are never unlinked while held.
+2. **Transaction-Bounded Payload Preparation & Canonical Serialization:**
+   - Execute `BEGIN IMMEDIATE` on the writable SQLite connection to establish the write-serialization boundary before snapshot extraction.
+   - **Path A (Final Submission → `COMPLETED`):** The final question submission mutation (`status = SUBMITTED`), the transition to `COMPLETED`, the complete response snapshot, and `publication_intent` are constructed and committed within this single transaction. The final response is never acknowledged as submitted without atomically committing assessment completion.
+   - **Path B (Timeout / Early Close):** The transaction lock is established before extracting the snapshot (capturing current drafts and unanswered questions) and committing `TIMED_OUT` or `CLOSED_EARLY` alongside `publication_intent`.
+   - Validate payload structurally against target `attempt.schema.json`. Serialize the canonical payload using RFC 8785 Canonical JSON (deterministic key ordering, UTF-8, normalized numbers) and calculate `expected_sha256`.
+3. **Atomic Terminal Commitment & Publication Intent:** Within the open transaction, atomically commit:
+   - Terminal lifecycle state (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`).
+   - Final response snapshot (incorporating the final submission in Path A).
+   - Immutable `publication_intent`: `target_schema_version`, `export_projection_version: "1"`, `destination_path`, `canonicalization_version: "1"`, `expected_sha256`.
+   - Execute `COMMIT;`. Filesystem publication then proceeds using the already-determined canonical bytes.
+4. **Destination Conflict Pre-Check:** Under the destination lock, inspect `destination_path`. If an artifact exists with a different `attempt_id`, abort immediately with `CONFLICT_DIFFERENT_ATTEMPT` (exit 2) without writing or renaming. Overwriting another attempt's artifact is strictly prohibited.
+5. **Attempt-Specific Temporary File Write & Fsync:** Write canonical bytes to `.attempt.<attempt-id>.tmp` in the destination directory, flush, and `fsync` the file descriptor.
+6. **Atomic Rename / Link:** Atomically rename `.attempt.<attempt-id>.tmp` to `attempt.json` (on Linux, using `renameat2(..., RENAME_NOREPLACE)` or atomic link/rename guarantees no race overwrites another attempt's artifact).
+7. **Destination Directory Fsync:** Open parent directory descriptor and `fsync` directory metadata, guaranteeing rename persistence across power failures.
+8. **Verified WAL Checkpoint:** Through the open writable connection, execute passive/truncate WAL checkpoint (`PRAGMA wal_checkpoint(TRUNCATE);`) and verify completion (`busy == 0, log == 0`).
+9. **Clean Close & Ordered Journal Cleanup:** Close all database handles cleanly. SQLite removes/truncates `-shm` and `-wal`. Then verify companion removal (unlinking `-wal` and `-shm` explicitly if still present), and unlink the primary `.sqlite3` database file **last**.
+10. **Structured Process Outcome:** Emit single-line JSON outcome packet on stdout and exit 0 (`SUCCESS_FINALIZED`).
 
-*Invariant:* The temporary journal file set is never deleted if export publication fails. Recovery (`live-quiz recover`) retries publication under the exact same `attempt_id`.
+*Operational Decoupling:*
+- If publication fails during steps 1–7 (e.g. disk full, permission denied, destination conflict, directory sync failure), the process exits with `EXPORT_IO_ERROR` (code 1) or conflict codes (2, 3) and the complete journal file set remains intact.
+- If publication succeeds through step 7 but checkpoint or journal cleanup (steps 8–9) fails, the process exits with `CLEANUP_PENDING` (code 6), signaling that `attempt.json` is durable and verified, but journal removal requires retry.
 
-### 5.4 Two Distinct Recovery Paths
-Invoking `live-quiz recover --from-path ~/.local/state/live-quiz/sessions/<attempt-id>.sqlite3` routes deterministically based on journal state:
-1. **Nonterminal Recovery:** If the journal records an active or paused attempt (`RUNNING` or `PAUSED`), recovery restores the authoritative countdown clock, re-mounts acknowledged drafts, resumes the local HTTP server, and displays an in-browser resume control under the exact same `attempt_id`.
-2. **Terminal Export Recovery:** If the journal already records a terminal state (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`) but atomic export failed, recovery reconstructs and retries `attempt.json` publication *without reopening the assessment, restarting the timer, or permitting further modifications*.
-In both paths, the temporary SQLite journal file set (`.sqlite3`, `-wal`, `-shm`) is unlinked only after durable export publication succeeds.
+### 5.4 Two Distinct Recovery Paths & Idempotency Verification
+Invoking `live-quiz recover --from-path <journal.sqlite3>` acquires the shared advisory locks (per-attempt and destination lock) and routes deterministically:
+1. **Nonterminal Recovery (`RUNNING` or `PAUSED`):**
+   - Applies in-place transactional migrations if the internal journal schema version differs from the current engine.
+   - Restores the authoritative countdown clock, re-mounts acknowledged drafts, resumes the local HTTP server, and displays an in-browser resume control under the exact same `attempt_id`.
+2. **Terminal Export Recovery (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`):**
+   - **Phase 1: Read-Only Historical Extraction & Reconstruction:**
+     - Opens SQLite with a read-only connection (`mode=ro`), reading existing `-wal` and `-shm` frames without mutating user tables or schema on disk.
+     - Reads persisted `publication_intent`. Legacy journals lacking `publication_intent` are explicitly rejected as unsupported (`UNSUPPORTED_SCHEMA_VERSION`, exit 5) because their target schema and reference hash cannot be verified deterministically.
+     - Reconstructs canonical bytes using the versioned export projection (`export_projection_version`). Before publishing, recovery calculates the SHA-256 digest of the reconstructed bytes and verifies that it strictly matches `expected_sha256`. If a mismatch occurs, recovery halts closed (`CONFLICT_INTEGRITY_MISMATCH`, exit 3) and preserves the journal.
+   - **Idempotency Verification against Persisted Hash:**
+     - *Artifact does not exist:* Publishes reconstructed canonical bytes via steps 4–7.
+     - *Artifact exists with matching `attempt_id` and matching `expected_sha256`:* Previous publication succeeded; advances directly to Phase 2 cleanup.
+     - *Artifact exists with different `attempt_id`:* Halts immediately, preserves journal, emits `CONFLICT_DIFFERENT_ATTEMPT`, and exits code 2.
+     - *Artifact exists with matching `attempt_id` but differing SHA-256:* Halts immediately, preserves journal, emits `CONFLICT_INTEGRITY_MISMATCH`, and exits code 3.
+   - **Phase 2: Post-Verification Writable Cleanup Connection:**
+     - Opened only after Phase 1's read-only connection and read transaction are closed cleanly, ensuring no lingering reader locks prevent checkpointing.
+     - Opened only after `attempt.json` has been durably published, verified against `expected_sha256`, and destination directory `fsync` has completed.
+     - Connects in writable mode solely to execute `PRAGMA wal_checkpoint(TRUNCATE);` with verified completion (`busy == 0, log == 0`). Schema migrations or table mutations are strictly prohibited on this connection.
+     - Closes connection cleanly, unlinks companion files (`-wal`, `-shm`), unlinks `.sqlite3` **last**, emits `SUCCESS_FINALIZED`, and exits 0. If checkpointing fails, journal is kept intact and process exits with `CLEANUP_PENDING` (code 6).
+   - **Partial Cleanup Invariant:** Because cleanup unlinks companion files first and `.sqlite3` last, orphaned `-wal` or `-shm` files without `.sqlite3` represent an unexpected anomaly. Recovery halts safely and reports an integrity error rather than silently deleting orphaned files.
 
 ---
 

@@ -38,21 +38,26 @@ stateDiagram-v2
     end note
 ```
 
-4. **Durability Invariants & Engine Pragmas:**
+4. **Durability Invariants, Journal Schema Versioning & Dual Advisory Locking:**
    - **Commit-Before-Ack:** The HTTP server commits transactions to SQLite *before* returning a successful `200 OK` acknowledgement to the client for any submission or autosaved draft.
-   - **Engine Configuration:** SQLite runs in Write-Ahead Logging mode (`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;`). `synchronous=FULL` ensures SQLite performs the required WAL synchronization after each transaction commit, providing durability against process and system failures under the documented filesystem and storage assumptions.
-   - **Storage Location & Journal File Set:** Journals reside on persistent local storage (`~/.local/state/live-quiz/sessions/`), never in volatile tmpfs. In WAL mode, the journal consists of the primary database (`<attempt-id>.sqlite3`) and its companion files (`<attempt-id>.sqlite3-wal`, `<attempt-id>.sqlite3-shm`). Because committed transactions may reside in the `-wal` file before checkpointing, recovery and lifecycle operations must manage and preserve the entire journal file set.
-   - **Crash Recovery Scope:** Recovery guarantees restoration of all *acknowledged* state. Unacknowledged in-flight client keystrokes that never completed an HTTP transaction are explicitly excluded.
-   - **Active-Time Recovery:** Active time is measured via a monotonic clock and checkpointed periodically (~1s interval). On recovery after an unexpected crash, the active countdown resumes from the last committed checkpoint. Process downtime while dead is excluded from the active-time budget and recorded separately as an interruption event.
-5. **Journal Destruction Invariant & Draft Preservation:**
-   - Upon reaching a terminal state (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`), the server serializes `attempt.json`, preserving all submitted responses, acknowledged unsubmitted drafts (as `DRAFT`), and unattempted questions (as `UNANSWERED`).
-   - The temporary SQLite journal file set (`.sqlite3`, `-wal`, `-shm`) is unlinked **only after durable export publication succeeds** and all database connections are closed. If publication fails, the journal remains intact for retry via recovery.
-6. **Explicit Recovery Command & Two Recovery Paths:**
-   - If a process is killed unexpectedly (`SIGKILL`) or grace period expires while paused, the journal set remains on disk.
-   - Running `live-quiz recover --from-path <journal.sqlite3>` inspects journal state and executes one of two deterministic paths:
-     1. **Nonterminal Recovery:** For `RUNNING` or `PAUSED` attempts, validates the journal set (leveraging companion `-wal`), restores the authoritative clock, reloads drafts, and resumes the server under the exact same `attempt_id`.
-     2. **Terminal Export Recovery:** If the journal already records a terminal state (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`) but publication failed, recovery retries `attempt.json` publication directly from the journal without reopening the assessment session, restarting the timer, or permitting further modifications.
-   - *Recovery Idempotency:* If recovery is invoked on a journal whose `attempt.json` was already successfully published, it verifies the export, cleans up the journal file set, and exits cleanly.
+   - **Engine Configuration:** SQLite runs in Write-Ahead Logging mode (`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;`). `synchronous=FULL` ensures SQLite performs the required WAL synchronization after each transaction commit under documented filesystem/storage assumptions.
+   - **Independent Journal Schema Versioning:** SQLite journals declare an internal schema version (`schema_version`), evolved independently from external `attempt.json` schemas. Historical nonterminal journals are migrated directly to the current internal version via version-dispatched adapters (V1→Vcurrent).
+   - **Storage Location & Journal File Set:** Journals reside on persistent local storage (`~/.local/state/live-quiz/sessions/`), never in volatile tmpfs. The journal file set consists of `<attempt-id>.sqlite3`, `<attempt-id>.sqlite3-wal`, and `<attempt-id>.sqlite3-shm`.
+   - **Dual Advisory Lock Scope:** All publication and recovery operations synchronize using exclusive advisory lock files in `~/.local/state/live-quiz/locks/` (per-attempt lock `attempt-<attempt-id>.lock` and destination lock `dest-<sha256_dest>.lock`), which are never unlinked while held.
+   - **Crash Recovery Scope:** Recovery guarantees restoration of all *acknowledged* state. Active time resumes from the last committed ~1s checkpoint; downtime is excluded.
+5. **Atomic Terminal Commitment & Safe Ordered Destruction:**
+   - **Atomic Terminal Transaction & Path Distinction:** The SQLite write boundary is established before final snapshot extraction via `BEGIN IMMEDIATE`:
+     - *Path A (Final Submission → `COMPLETED`):* The response mutation to `SUBMITTED`, transition to `COMPLETED`, complete response snapshot, and `publication_intent` (`target_schema_version`, `export_projection_version: "1"`, `canonicalization_version: "1"`, `destination_path`, `expected_sha256`) are committed in one single atomic transaction. The final response is never acknowledged without atomically committing completion.
+     - *Path B (Timeout / Early Close):* The transaction lock is established before extracting the snapshot (capturing current drafts and unanswered questions) and committing `TIMED_OUT` or `CLOSED_EARLY` alongside `publication_intent`.
+   - **Safe Ordered Deletion:** The journal is destroyed only after publication durability (including directory `fsync`) is established: through an open writable connection execute verified WAL checkpoint (`PRAGMA wal_checkpoint(TRUNCATE);`) → close all database connections cleanly → verify companion removal (unlinking `-wal` and `-shm` explicitly if present) → unlink primary `.sqlite3` **last**.
+   - If cleanup fails after durable export, `live-quiz` exits with `CLEANUP_PENDING` (code 6), preserving `.sqlite3` for cleanup retry.
+6. **Recovery Paths & Hash-Verified Idempotency:**
+   - **Nonterminal Recovery:** In-place transactional migration to current internal schema; live assessment resumed.
+   - **Terminal Export Recovery:** Decouples Phase 1 read-only extraction from Phase 2 post-verification writable cleanup:
+     - *Phase 1 (Read-Only):* Uses read-only connection (`mode=ro`) to read existing WAL frames without mutating database tables or schema; reconstructs export using `export_projection_version` and verifies against persisted `expected_sha256`. Legacy journals lacking `publication_intent` are rejected as unsupported (`UNSUPPORTED_SCHEMA_VERSION`, exit 5). Phase 1 read-only connection is closed cleanly before Phase 2.
+     - *Idempotency Verification:* Compares existing destination artifacts against persisted `expected_sha256`. Matching hash triggers Phase 2 cleanup; mismatch triggers an integrity conflict (exit 3); different `attempt_id` triggers artifact conflict (exit 2).
+     - *Phase 2 (Writable Cleanup):* Opened only after Phase 1 connection is closed and durable publication is established; executes verified WAL checkpoint without schema or table modifications, closes connection, and unlinks companions then `.sqlite3` last.
+   - **Orphan Anomaly Rule:** Orphaned `-wal` or `-shm` files without `.sqlite3` represent an unexpected anomaly; recovery halts safely and reports an integrity error without deleting files.
 
 ## Alternatives Considered
 - **Permanent SQLite LMS Database:** Rejected. Burdening `live-quiz` with multi-workspace relational history, cross-project analytics, and long-term migrations creates severe scope creep. `live-quiz` is an assessment execution harness, not a full Learning Management System.
