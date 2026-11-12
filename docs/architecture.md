@@ -143,12 +143,55 @@ The system explicitly separates:
 ### 5.2 Ephemeral SQLite Session Journal
 During active assessment, `live-quiz` maintains state in a temporary SQLite database (`~/.local/state/live-quiz/sessions/<attempt-id>.sqlite3`):
 - Server commits acknowledged draft updates, answer submissions, and timing events atomically to SQLite.
+- **Active-Time Representation:** Accumulated active time is tracked and persisted as an integer nanosecond scalar (`accumulated_active_ns`) in the session state table, converted to seconds only for UI display and `attempt.json` export.
+- **In-Memory Anchor Advancement Invariant:**
+  $$\Delta t = t_{\text{monotonic now}} - t_{\text{last committed}}$$
+  $$\text{accumulated\_active\_ns}' = \text{accumulated\_active\_ns} + \Delta t$$
+  The in-memory anchor `last_committed_checkpoint_ns` advances strictly **after** the SQLite transaction commits successfully. If commit fails, the anchor does not advance.
+- **Checkpoint Triggers & Durability Guarantee:** Checkpoints target approximately 1 second while `RUNNING`, with synchronous immediate checkpoints on pause, autosave, submission, timeout, and early close (all sharing the serialized write boundary `BEGIN IMMEDIATE`). Recovery resumes from the last successfully committed active-time checkpoint; uncommitted elapsed time is not guaranteed to be preserved under sudden process crashes or machine load.
 - **Durable Pause Checkpoint & In-Browser Resume:** Clicking **Pause** commits state, freezes active time, records `status = PAUSED` in SQLite, and displays an in-browser Resume control.
 - **Configurable Pause Grace Period (Default: 2 Hours):** The server remains alive and accessible in the browser during a 2-hour window (`--pause-grace-period 2h`). If resumed within this window, the assessment continues instantly in the browser.
-- **Grace-Period Expiration:** If the 2-hour grace period expires without resumption, the server process terminates cleanly to prevent zombie processes, retaining the journal with status `PAUSED` and emitting `outcome: SUSPENDED` on stdout.
+- **Grace-Period Expiration & Boot Identity:** Pause grace is measured using Linux `CLOCK_BOOTTIME` (which advances across system sleep). Stored metadata includes `{ boot_id, pause_started_boottime_ns, pause_deadline_boottime_ns }`. If the 2-hour grace period expires without resumption on the same boot, the server process terminates cleanly to prevent zombie processes, retaining the journal with status `PAUSED` and emitting `outcome: SUSPENDED` on stdout. Across a machine reboot, the original in-browser server is dead, the persisted boottime deadline is never compared across different boot IDs, and the journal remains intact for manual CLI recovery.
 - Unexpected kills (`SIGKILL`, power failure) leave the journal intact for recovery.
 
-### 5.3 Ten-Step Atomic Publication Pipeline & Durability Contract
+### 5.3 Dual-Clock Timing Architecture & Temporal Edge Cases
+1. **Definition of Active Assessment Time:**
+   Active assessment time is accumulated while the assessment is `RUNNING`, the engine is operational, and the host system is awake. It does not accumulate while `PAUSED`, the host is suspended, or the engine is terminated:
+
+   | Situation | Assessment State | Active Budget | Pause Grace Window |
+   | :--- | :--- | :--- | :--- |
+   | Learner answering questions | `RUNNING` | Decreases | Not applicable (not paused) |
+   | Browser tab hidden / backgrounded | `RUNNING` | Decreases | Not applicable (not paused) |
+   | Host system suspended (laptop lid closed) | `RUNNING` | **Frozen** | Not applicable (not paused) |
+   | Learner explicitly pauses | `PAUSED` | **Frozen** | Elapses toward deadline |
+   | Host system suspended while paused | `PAUSED` | **Frozen** | Elapses toward deadline |
+   | Engine crashes or terminates | Last persisted checkpoint | **Frozen** | In-browser server exited (persisted boottime deadline continues elapsing on same boot only if last persisted state was PAUSED) |
+
+2. **Dual-Clock System & Linux Platform Baseline:**
+   - **Active Assessment Budget (`CLOCK_MONOTONIC`):** Sampled via `time.monotonic_ns()`. Unaffected by discontinuous wall-clock shifts (manual time adjustments, NTP steps), though subject to gradual frequency adjustments (NTP slewing). Crucially, it halts during kernel suspend (ACPI S3/sleep), automatically freezing the assessment budget when a laptop lid closes without requiring OS D-Bus or `systemd-logind` hooks.
+   - **Operational Pause Grace Timer (`CLOCK_BOOTTIME`):** Sampled via `time.clock_gettime_ns(time.CLOCK_BOOTTIME)`. Advances during kernel suspend, ensuring that laptop sleep elapses the in-browser keepalive window.
+   - **BOOTTIME-Aware Pause-Grace Watchdog:** Because Python's `asyncio` event loop schedules delayed timers via `loop.time()` (which uses `CLOCK_MONOTONIC` and halts during suspend), an ordinary `asyncio.sleep()` cannot reliably fire a boottime deadline. The pause-grace watchdog re-evaluates the persisted `CLOCK_BOOTTIME` deadline at the first post-wake watchdog execution (triggered when a suspend gap is detected or via a bounded periodic check), executing clean shutdown with `outcome: SUSPENDED` if the deadline has passed while asleep.
+3. **Autonomous Watchdog, Immutable Time Limits & Serialized Admission:**
+   - **Immutable Attempt Time Limit (`time_limit_ns`):** The assessment duration budget is immutable for each attempt. It is persisted in SQLite session state at attempt initialization and traceable to the immutable questionnaire version. Recovery must never load altered CLI defaults or application configurations that silently mutate an existing attempt's time budget.
+   - An `asyncio` background watchdog in FastAPI monitors the remaining active budget. When the deadline is reached, it initiates the terminal transition to `TIMED_OUT` without waiting for client interaction.
+   - **Serialized Mutation Admission Rule:** Every mutation endpoint (`POST /api/response/autosave`, `POST /api/response/submit`) independently validates the deadline while holding the SQLite write-serialization boundary (`BEGIN IMMEDIATE`). Monotonic time is sampled *after* acquiring the write lock:
+     - $T_{\text{elapsed}} < T_{\text{limit}} \implies$ mutation accepted and checkpointed.
+     - $T_{\text{elapsed}} \ge T_{\text{limit}} \implies$ mutation rejected; endpoint commits `TIMED_OUT` and `publication_intent`.
+   - A delay in the background watchdog cannot allow late submissions to be accepted.
+   - **Overdue Recovery Guard:** If `live-quiz recover` inspects a journal where `accumulated_active_ns >= time_limit_ns`, the engine immediately terminalizes the attempt as `TIMED_OUT` and initiates atomic export before any interactive resume is permitted.
+4. **System Suspend Gap Detection:**
+   - The engine periodically compares clock deltas:
+     $$T_{\text{suspended}} \approx \Delta T_{\text{BOOTTIME}} - \Delta T_{\text{MONOTONIC}}$$
+   - When a positive discrepancy exceeds a threshold (indicating the machine slept), the engine appends a `SUSPEND_GAP_DETECTED` event to the `session_intervals` audit table upon wake.
+   - `session_intervals` table uses `event_sequence INTEGER PRIMARY KEY AUTOINCREMENT` to guarantee strictly monotonic event ordering independently of wall-clock accuracy.
+5. **Browser Presentation & Re-synchronization:**
+   - The browser UI is a presentation layer only. Countdown is calculated locally based on the latest server payload (`remaining_seconds`, `is_active`).
+   - When a tab is hidden, local visual updates halt to avoid burning CPU on throttled timers.
+   - The client listens to the Page Visibility API (`document.visibilityState === 'visible'`) and window reconnect events, issuing `GET /api/session` upon re-entry to resynchronize the countdown without continuous background polling.
+6. **Threat Model & Trust Boundary:**
+   The timing architecture is **server-authoritative relative to the browser**, guarding against client clock tampering, background timer throttling, network latency games, and wall-clock skew. Host-level root or user tampering (e.g. modifying SQLite directly or patching the Python binary) is explicitly outside the threat model of a local, formative personal assessment tool.
+
+### 5.4 Ten-Step Atomic Publication Pipeline & Durability Contract
 Upon reaching a terminal state (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`), publication executes through a strict 10-step durability pipeline protected by dual advisory locks (per-attempt and destination-level):
 1. **Dual Advisory Concurrency Locks:** Acquire exclusive locks via `fcntl`/`flock` on:
    - Per-attempt lock file (`~/.local/state/live-quiz/locks/attempt-<attempt-id>.lock`), coordinating publication and recovery.
@@ -176,7 +219,7 @@ Upon reaching a terminal state (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`), publi
 - If publication fails during steps 1–7 (e.g. disk full, permission denied, destination conflict, directory sync failure), the process exits with `EXPORT_IO_ERROR` (code 1) or conflict codes (2, 3) and the complete journal file set remains intact.
 - If publication succeeds through step 7 but checkpoint or journal cleanup (steps 8–9) fails, the process exits with `CLEANUP_PENDING` (code 6), signaling that `attempt.json` is durable and verified, but journal removal requires retry.
 
-### 5.4 Two Distinct Recovery Paths & Idempotency Verification
+### 5.5 Two Distinct Recovery Paths & Idempotency Verification
 Invoking `live-quiz recover --from-path <journal.sqlite3>` acquires the shared advisory locks (per-attempt and destination lock) and routes deterministically:
 1. **Nonterminal Recovery (`RUNNING` or `PAUSED`):**
    - Applies in-place transactional migrations if the internal journal schema version differs from the current engine.

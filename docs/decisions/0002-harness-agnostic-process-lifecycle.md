@@ -15,7 +15,7 @@ Design `live-quiz` as a standard foreground UNIX process whose termination signa
 2. **Structured Lifecycle Outcome:**
    Upon process termination, `live-quiz` emits a machine-readable JSON outcome on stdout:
    - **`FINALIZED`:** The assessment reached a terminal state (`COMPLETED`, `CLOSED_EARLY`, `TIMED_OUT`). `attempt.json` was durably exported. Caller proceeds to evaluation.
-   - **`SUSPENDED`:** The assessment was paused and the 2-hour grace period expired (or process terminated). The SQLite journal is retained. Caller does **not** invoke evaluation.
+   - **`SUSPENDED`:** The assessment was paused and the server deliberately exits upon 2-hour grace period expiration. The pause grace period is measured using Linux `CLOCK_BOOTTIME` (advancing across system sleep) on the current host boot, distinct from the learner's active assessment budget (`CLOCK_MONOTONIC`). The SQLite journal is retained with status `PAUSED`. Caller does **not** invoke evaluation. Unexpected termination (`SIGKILL`, power failure) cannot guarantee a structured outcome packet; the caller must detect abnormal exit and offer manual recovery.
    - **`ERROR`:** An operational error occurred. The SQLite journal is retained for recovery.
 3. **Sequence Diagram:**
 
