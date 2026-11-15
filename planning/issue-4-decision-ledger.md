@@ -1,7 +1,7 @@
 # Issue #4 Authoritative Decision Ledger
 
 **Project:** `live-quiz`  
-**Scope:** Authoritative provenance record, settled architectural baseline, accepted `B2` decisions, unapproved `step 850` recommendations (`S1-01`–`S1-17`), deferred implementation boundaries (`DEF-01`–`DEF-05`), and maintenance protocol for Original Issue #4.  
+**Scope:** Authoritative provenance record, settled architectural baseline, accepted `B2` decisions, Stage 1 architectural decisions (`S1-01`–`S1-17`, `USER_EXPLICIT`), deferred implementation boundaries (`DEF-01`–`DEF-05`), and maintenance protocol for Original Issue #4.  
 **Repository Baseline:** `main` @ `a4eeccf` ([docs/architecture.md](../docs/architecture.md), [docs/decisions/0001`–`0009](../docs/decisions/README.md)).  
 **Companion Artifact:** [issue-4-follow-through.md](issue-4-follow-through.md) (authoritative for execution order, dependencies, and work status).
 
@@ -21,9 +21,9 @@ This ledger governs **decision state and provenance** for Issue #4, while [issue
    - The committed repository architecture on `main` @ `a4eeccf` ([docs/architecture.md](../docs/architecture.md) and [ADR-0001](../docs/decisions/0001-standalone-web-application.md) through [ADR-0009](../docs/decisions/0009-modular-portable-reference-skills.md), resolving Issues #1–#3 and #5–#8) together with the foundational Issue #4 handoff baseline (`steps 820–827`, recorded in Section 1 below).
    - **Rule:** Downstream decisions must respect these invariants. Accepting a high-level architectural direction does **not** implicitly approve unreviewed sub-mechanisms or implementation details attached to it later.
 
-3. **Assistant / Agent Recommendations Awaiting Approval (`UNAPPROVED_RECOMMENDATION — step 850`):**
+3. **Originating Assistant Recommendations (`UNAPPROVED_RECOMMENDATION — step 850`, now resolved):**
    - In `step 850` of the discovery transcript, a single assistant turn simulated synthetic user prompts and emitted a premature "Stage 1 Decision Closure Report" marking items `B2.4.1` through `E2` as `Accepted`.
-   - **Rule:** A recommendation marked `Accepted` in that earlier assistant-generated closure report is **not** an approved decision. The transcript audit and [issue-4-follow-through.md](issue-4-follow-through.md) Section 0 govern. All 17 atomic items (`S1-01`–`S1-17`, recorded in Section 3 below) remain `PENDING_USER_REVIEW`.
+   - **Rule & Closure State:** A recommendation marked `Accepted` in that earlier assistant-generated closure report was **not** an approved decision. Each of the 17 atomic items (`S1-01`–`S1-17`, recorded in Section 3 below) was subsequently reviewed one-by-one and resolved with `USER_EXPLICIT` provenance on `2026-11-15` (`2` `ACCEPTED_AS_PROPOSED`, `15` `ACCEPTED_WITH_MODIFICATIONS`; zero `PENDING_USER_REVIEW` items remain).
 
 4. **Deferred Implementation Decisions (`DEF-01`–`DEF-05`):**
    - Concrete engineering specifications (exact JSON field names, library selection, CLI flag spellings, wire framing, systemd unit parameters, backup retention numbers) intentionally postponed until after Stage 3 acceptance criteria (`S3-01`).
@@ -69,9 +69,9 @@ In `step 849`, the user decomposed `B2.4` into five subdecisions (`B2.4.1`–`B2
 
 ---
 
-## Section 3 — Unapproved Recommendations Requiring Review (`S1-01` through `S1-17`)
+## Section 3 — Resolved Stage 1 Architectural Decisions (`S1-01` through `S1-17`)
 
-Every entry below originated in `step 850` and requires an explicit user turn assigning a disposition (`ACCEPTED_AS_PROPOSED`, `ACCEPTED_WITH_MODIFICATIONS`, `REJECTED_IN_FAVOR_OF_ALTERNATIVE`, `DEFERRED_WITH_JUSTIFICATION`, or `NOT_APPLICABLE_WITH_JUSTIFICATION`).
+Every entry below originated as an unapproved `step 850` recommendation and has received an explicit `USER_EXPLICIT` disposition (`2026-11-15`; `2` `ACCEPTED_AS_PROPOSED`, `15` `ACCEPTED_WITH_MODIFICATIONS`).
 
 ### `S1-01` — `B2.4.1` (Contract Version Scope)
 | Field | Description |
